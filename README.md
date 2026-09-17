@@ -82,6 +82,13 @@ and full HTTP integration (real store + real worker pool behind
 
 All endpoints are prefixed `/v1` except health. Every response is JSON.
 
+A ready-to-import Postman collection is at
+[Aurik-Equipment-Monitor.postman_collection.json](Aurik-Equipment-Monitor.postman_collection.json)
+-- 15 requests covering every endpoint below, including the malformed/
+duplicate/rejected edge cases, each with an inline test assertion. Import
+it, set the `base_url` collection variable if you're not on `:8080`, and
+run top to bottom.
+
 | Method & path | Purpose |
 |---|---|
 | `GET /healthz` | Liveness check. |
