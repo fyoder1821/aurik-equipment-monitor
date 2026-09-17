@@ -1,0 +1,453 @@
+{
+  "info": {
+    "name": "Aurik Equipment Monitor",
+    "description": "Ingestion + output-serving API for the Aurik Tech Lead assessment backend. Set the `base_url` collection variable (defaults to http://localhost:8080) and run requests top to bottom -- the ingest requests populate `batch_id`/`machine_id` variables used by the requests below them. Processing is asynchronous but typically finishes in well under a second locally; if a status/view request still shows a queued/no_data record, just resend it.\n\nStorage is in-memory and dedupe keys (event id, and a vendor+machine+event_type+event_time content key) live for the life of the server process. Re-running the Ingestion folder a second time against the same still-running server will correctly show every record as 'duplicate' rather than 'processed' -- that's the dedupe logic working, not a bug. Restart the server (or `docker compose restart`) to get a clean state again.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080", "type": "string" },
+    { "key": "batch_id", "value": "", "type": "string" },
+    { "key": "machine_id", "value": "EQ-001", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Healthz",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthz",
+              "host": ["{{base_url}}"],
+              "path": ["healthz"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Ingestion",
+      "item": [
+        {
+          "name": "PulseForge - Happy Path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202', function () { pm.response.to.have.status(202); });",
+                  "var jsonData = pm.response.json();",
+                  "pm.collectionVariables.set('batch_id', jsonData.batch_id);",
+                  "pm.test('batch_id present', function () { pm.expect(jsonData.batch_id).to.be.a('string').and.not.empty; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendor\": \"PulseForge\",\n  \"plant_id\": \"PLANT_01\",\n  \"batch_generated_at\": \"2026-04-18T08:05:00Z\",\n  \"events\": [\n    {\n      \"event_id\": \"PF-1001\",\n      \"machine_id\": \"EQ-001\",\n      \"line_id\": \"LINE-A\",\n      \"event_time\": \"2026-04-18T07:59:12Z\",\n      \"event_type\": \"HIGH_VIBRATION\",\n      \"severity\": \"high\",\n      \"vibration_mm_s\": 11.8,\n      \"temperature_c\": 83.2,\n      \"machine_state\": \"running\",\n      \"sensor_health\": 0.91,\n      \"vendor_confidence\": 0.87\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/pulseforge",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "pulseforge"]
+            },
+            "description": "Single valid PulseForge event for EQ-001. Sets the `batch_id` collection variable used by 'Get Batch Status' below, and this is the machine the 'Machine Operational View' requests default to."
+          },
+          "response": []
+        },
+        {
+          "name": "PulseForge - Batch With One Malformed Record",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202 (envelope is well-formed, even though one record inside it is not)', function () { pm.response.to.have.status(202); });",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('record_count is 2', function () { pm.expect(jsonData.record_count).to.eql(2); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendor\": \"PulseForge\",\n  \"plant_id\": \"PLANT_01\",\n  \"batch_generated_at\": \"2026-04-18T08:30:00Z\",\n  \"events\": [\n    {\n      \"event_id\": \"PF-1201\",\n      \"machine_id\": \"\",\n      \"line_id\": \"LINE-A\",\n      \"event_time\": \"2026-04-18T08:28:12Z\",\n      \"event_type\": \"HIGH_VIBRATION\",\n      \"severity\": \"high\",\n      \"vibration_mm_s\": 10.9,\n      \"temperature_c\": 82.5\n    },\n    {\n      \"event_id\": \"PF-1205\",\n      \"machine_id\": \"EQ-002\",\n      \"line_id\": \"LINE-A\",\n      \"event_time\": \"2026-04-18T08:28:20Z\",\n      \"event_type\": \"RECOVERY_SIGNAL\",\n      \"severity\": \"low\",\n      \"vibration_mm_s\": 3.0,\n      \"temperature_c\": 65.0\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/pulseforge",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "pulseforge"]
+            },
+            "description": "Mirrors vendor_api_samples/malformed.json: an empty machine_id (gets rejected) alongside a healthy record (gets processed). Check the returned batch_id's status to see both outcomes -- the empty machine_id must not sink the whole batch."
+          },
+          "response": []
+        },
+        {
+          "name": "PulseForge - Duplicate Event In One Batch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202', function () { pm.response.to.have.status(202); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vendor\": \"PulseForge\",\n  \"plant_id\": \"PLANT_01\",\n  \"batch_generated_at\": \"2026-04-18T09:15:00Z\",\n  \"events\": [\n    {\n      \"event_id\": \"PF-DUP-1\",\n      \"machine_id\": \"EQ-003\",\n      \"line_id\": \"LINE-B\",\n      \"event_time\": \"2026-04-18T09:14:40Z\",\n      \"event_type\": \"HIGH_VIBRATION\",\n      \"severity\": \"medium\",\n      \"vibration_mm_s\": 6.5,\n      \"temperature_c\": 74.0\n    },\n    {\n      \"event_id\": \"PF-DUP-1\",\n      \"machine_id\": \"EQ-003\",\n      \"line_id\": \"LINE-B\",\n      \"event_time\": \"2026-04-18T09:14:40Z\",\n      \"event_type\": \"HIGH_VIBRATION\",\n      \"severity\": \"medium\",\n      \"vibration_mm_s\": 6.5,\n      \"temperature_c\": 74.0\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/pulseforge",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "pulseforge"]
+            },
+            "description": "Mirrors vendor_api_samples/duplicates.json: the same event_id sent twice in one batch. Check the batch status -- the first record should be 'processed', the second 'duplicate'."
+          },
+          "response": []
+        },
+        {
+          "name": "ThermexWatch - Happy Path",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202', function () { pm.response.to.have.status(202); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"ThermexWatch\",\n  \"site_code\": \"PLANT_01\",\n  \"response_time_epoch_ms\": 1776499560000,\n  \"readings\": [\n    {\n      \"readingId\": \"TW-8801\",\n      \"assetCode\": \"EQ-001\",\n      \"productionLine\": \"A\",\n      \"timestampMs\": 1776499152000,\n      \"alertCode\": \"VIB_WARN\",\n      \"level\": 4,\n      \"vibration_g\": 0.81,\n      \"temperature_f\": 181.2,\n      \"power_kw\": 37.8,\n      \"is_active\": true,\n      \"signal_quality\": \"GOOD\"\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/thermexwatch",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "thermexwatch"]
+            },
+            "description": "Single valid ThermexWatch reading for EQ-001 -- camelCase fields, epoch-ms timestamp, Fahrenheit temperature, numeric 1-5 level."
+          },
+          "response": []
+        },
+        {
+          "name": "ThermexWatch - Unrecognized Alert Code (still accepted)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202', function () { pm.response.to.have.status(202); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"ThermexWatch\",\n  \"site_code\": \"PLANT_02\",\n  \"response_time_epoch_ms\": 1776500600000,\n  \"readings\": [\n    {\n      \"readingId\": \"TW-9912\",\n      \"assetCode\": \"EQ-008\",\n      \"productionLine\": \"ZZ\",\n      \"timestampMs\": 1776500220000,\n      \"alertCode\": \"UNKNOWN_ALERT\",\n      \"level\": 4,\n      \"vibration_g\": 0.29,\n      \"temperature_f\": 188.0,\n      \"power_kw\": 33.0,\n      \"is_active\": true,\n      \"signal_quality\": \"GOOD\"\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/thermexwatch",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "thermexwatch"]
+            },
+            "description": "Mirrors vendor_api_samples/malformed.json's TW-9912: an alert code outside the known set and a production line ('ZZ') that doesn't resolve for PLANT_02. Both are soft-normalized (flagged, not rejected) since the numeric level and machine id are still valid -- the record should come out 'processed', falling back to the asset reference's own line id."
+          },
+          "response": []
+        },
+        {
+          "name": "ThermexWatch - Null Asset Code (rejected)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 202 (envelope still valid)', function () { pm.response.to.have.status(202); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source\": \"ThermexWatch\",\n  \"site_code\": \"PLANT_02\",\n  \"response_time_epoch_ms\": 1776500600000,\n  \"readings\": [\n    {\n      \"readingId\": \"TW-9911\",\n      \"assetCode\": null,\n      \"productionLine\": \"D\",\n      \"timestampMs\": \"bad-ts\",\n      \"alertCode\": \"TEMP_WARN\",\n      \"level\": \"four\",\n      \"vibration_g\": 0.4,\n      \"temperature_f\": 170.0,\n      \"is_active\": true\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/thermexwatch",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "thermexwatch"]
+            },
+            "description": "Mirrors vendor_api_samples/malformed.json's TW-9911: null assetCode means the machine can never be identified, so this is a hard reject regardless of the other bad fields (bad-ts timestamp, non-numeric level). Check the batch status -- this record should come out 'rejected' with an unknown_machine_id reason."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Processing Status",
+      "item": [
+        {
+          "name": "Get Batch Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('has outcomes', function () { pm.expect(jsonData.outcomes).to.be.an('array'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/batches/{{batch_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "batches", "{{batch_id}}"]
+            },
+            "description": "Uses the `batch_id` set by 'PulseForge - Happy Path'. Run that request first. Each outcome entry shows queued/processed/duplicate/rejected/failed plus a reason and attempt count."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Batch Status - Unknown Batch (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/ingest/batches/does-not-exist",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "ingest", "batches", "does-not-exist"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Machine Operational View",
+      "item": [
+        {
+          "name": "Get Machine View",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('has derived_status', function () { pm.expect(jsonData.derived_status).to.be.a('string'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/machines/{{machine_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "machines", "{{machine_id}}"]
+            },
+            "description": "Run 'PulseForge - Happy Path' first so EQ-001 has data -- otherwise this still returns 200 with derived_status 'unknown' and processing_status 'no_data' (a known machine with nothing ingested yet is not a 404)."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Machine View - Unknown Machine (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/machines/EQ-999",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "machines", "EQ-999"]
+            },
+            "description": "EQ-999 isn't in the asset reference at all, which is the only case that returns 404 here (vs. a known machine with no data yet, which returns 200)."
+          },
+          "response": []
+        },
+        {
+          "name": "List Machines",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/machines",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "machines"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List Machines - Filtered by Plant and Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/machines?plant_id=PLANT_01&status=needs_attention",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "machines"],
+              "query": [
+                { "key": "plant_id", "value": "PLANT_01" },
+                { "key": "status", "value": "needs_attention" }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Plant / Line Summary",
+      "item": [
+        {
+          "name": "Get Plant Summary",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+                  "var jsonData = pm.response.json();",
+                  "pm.test('has total_machines', function () { pm.expect(jsonData.total_machines).to.be.a('number'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/plants/PLANT_01/summary",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "plants", "PLANT_01", "summary"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Plant Summary - Unknown Plant (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () { pm.response.to.have.status(404); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/v1/plants/PLANT_99/summary",
+              "host": ["{{base_url}}"],
+              "path": ["v1", "plants", "PLANT_99", "summary"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
