@@ -1,0 +1,6 @@
+plant_id,line_id,line_name,operating_window
+PLANT_01,LINE-A,Assembly,day_shift
+PLANT_01,LINE-B,Finishing,day_shift
+PLANT_01,LINE-C,Utilities,24x7
+PLANT_02,LINE-D,Mixing,day_shift
+PLANT_02,LINE-E,Packaging,night_shift
