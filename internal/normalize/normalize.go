@@ -16,8 +16,6 @@ package normalize
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"fmt"
 
 	"aurik-equipment-monitor/internal/domain"
 )
@@ -51,12 +49,4 @@ func clamp01(v float64) float64 {
 // (e.g. a -999 sentinel) rather than a real extreme reading.
 func plausibleTempC(c float64) bool {
 	return c >= -50 && c <= 300
-}
-
-func mustMarshal(v any) json.RawMessage {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return json.RawMessage(fmt.Sprintf(`{"marshal_error":%q}`, err.Error()))
-	}
-	return b
 }

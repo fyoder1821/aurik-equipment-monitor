@@ -58,6 +58,31 @@ to keep this from silently regressing.)
 Temperature, by contrast, *is* converted (°F → °C) -- that's a valid,
 lossless unit conversion, so there's no reason to keep two representations.
 
+## machine_state vs. is_active: not the same axis
+
+ThermexWatch's `is_active` suppresses attention (`internal/normalize/thermexwatch.go`):
+`is_active: false` means the vendor is telling you the alert condition
+itself has since cleared, so it shouldn't count toward current attention,
+only history. It's tempting to look for the same thing in PulseForge --
+its `machine_state` field (`running`/`idle`) looks like a similar kind of
+status flag -- and suppress attention whenever `machine_state == "idle"`.
+
+That would be wrong, and the seed data shows why: `PF-1004` in
+`pulseforge_events.csv` is `EQ-004`, `POWER_FLUCTUATION`, `severity: medium`,
+`machine_state: idle`. `is_active` and `machine_state` answer different
+questions. `is_active` is a statement about *the alert* -- is the specific
+condition being reported still true right now. `machine_state` is a
+statement about *the machine's operating mode* -- is it currently running
+or idle -- and says nothing about whether an anomaly PulseForge is
+reporting alongside it is still valid. PulseForge already encodes how
+concerning an event is via its own `severity` field; `machine_state`
+doesn't modify that. If anything, an idle machine throwing
+`HIGH_VIBRATION` or `POWER_FLUCTUATION` is a *stronger* signal, not a
+weaker one -- there's no load, so readings should be quiet, and they
+aren't. So PulseForge events are normalized with no equivalent
+suppression, and `machine_state` is carried through as descriptive
+metadata only (`event.MachineState`), the same way it arrives.
+
 ## Ordering: event_time, not arrival order
 
 `rules.Derive` picks each vendor's "current" reading by `event_time`, not
