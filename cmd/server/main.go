@@ -2,9 +2,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"aurik-equipment-monitor/internal/httpapi"
 	"aurik-equipment-monitor/internal/refdata"
@@ -13,8 +15,9 @@ import (
 )
 
 const (
-	workerCount = 4
-	queueSize   = 256
+	workerCount   = 4
+	queueSize     = 256
+	dbConnTimeout = 10 * time.Second
 )
 
 func main() {
@@ -23,10 +26,23 @@ func main() {
 		log.Fatalf("failed to load reference data: %v", err)
 	}
 
-	st := store.New(ref)
-	pool := worker.NewPool(workerCount, queueSize, st, st, ref)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		log.Fatal("DATABASE_URL is required, e.g. postgres://aurik:aurik@localhost:5432/aurik_equipment_monitor?sslmode=disable")
+	}
 
-	router := httpapi.NewRouter(st, pool)
+	connectCtx, cancel := context.WithTimeout(context.Background(), dbConnTimeout)
+	defer cancel()
+	dbPool, err := store.Open(connectCtx, dsn)
+	if err != nil {
+		log.Fatalf("failed to connect to database: %v", err)
+	}
+	defer dbPool.Close()
+
+	st := store.New(dbPool, ref)
+	workerPool := worker.NewPool(workerCount, queueSize, st, st, ref)
+
+	router := httpapi.NewRouter(st, workerPool)
 
 	port := os.Getenv("PORT")
 	if port == "" {
