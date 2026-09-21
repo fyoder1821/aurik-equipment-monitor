@@ -42,7 +42,7 @@ func Derive(machineID string, events []domain.NormalizedEvent, asset refdata.Ass
 	// look like the current one.
 	latestByVendor := map[domain.Vendor]domain.NormalizedEvent{}
 	for _, e := range events {
-		cur, ok := latestByVendor[e.Vendor]
+		cur, ok := latestByVendor[e.Vendor] // e.Vendor = pulseforge/thermexwatch
 		if !ok || e.EventTime.After(cur.EventTime) {
 			latestByVendor[e.Vendor] = e
 		}
