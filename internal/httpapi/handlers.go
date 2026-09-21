@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 
 	"aurik-equipment-monitor/internal/domain"
@@ -42,7 +44,12 @@ func (a *api) handleIngest(vendor domain.Vendor) http.HandlerFunc {
 			return
 		}
 
-		batch := a.store.CreateBatch(vendor, len(records))
+		batch, err := a.store.CreateBatch(r.Context(), vendor, len(records))
+		if err != nil {
+			log.Printf("create batch: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to accept batch")
+			return
+		}
 		for i, raw := range records {
 			a.pool.Submit(worker.Job{BatchID: batch.ID, Index: i, Vendor: vendor, Raw: raw})
 		}
@@ -85,7 +92,12 @@ func extractRecords(vendor domain.Vendor, body []byte) ([]json.RawMessage, error
 
 func (a *api) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("batchID")
-	b, ok := a.store.GetBatch(id)
+	b, ok, err := a.store.GetBatch(r.Context(), id)
+	if err != nil {
+		log.Printf("get batch %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to load batch")
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "batch not found")
 		return
@@ -95,7 +107,12 @@ func (a *api) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("machineID")
-	view, ok := a.store.GetMachineView(id)
+	view, ok, err := a.store.GetMachineView(r.Context(), id)
+	if err != nil {
+		log.Printf("get machine view %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to load machine view")
+		return
+	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown machine_id")
 		return
@@ -106,7 +123,12 @@ func (a *api) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 func (a *api) handleListMachines(w http.ResponseWriter, r *http.Request) {
 	plantFilter := r.URL.Query().Get("plant_id")
 	statusFilter := r.URL.Query().Get("status")
-	views := a.store.ListMachineViews(plantFilter, statusFilter)
+	views, err := a.store.ListMachineViews(r.Context(), plantFilter, statusFilter)
+	if err != nil {
+		log.Printf("list machines: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to list machines")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"machines": views,
 		"count":    len(views),
@@ -115,9 +137,14 @@ func (a *api) handleListMachines(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) handlePlantSummary(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("plantID")
-	summary, err := a.store.PlantSummary(id)
-	if err != nil {
+	summary, err := a.store.PlantSummary(r.Context(), id)
+	if errors.Is(err, domain.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
+		log.Printf("plant summary %s: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to load plant summary")
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)

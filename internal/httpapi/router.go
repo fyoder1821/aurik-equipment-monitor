@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"time"
@@ -10,15 +11,15 @@ import (
 	"aurik-equipment-monitor/internal/worker"
 )
 
-// Store is the read/write surface httpapi needs from the in-memory store.
-// Kept as an interface so handler tests can use a fake instead of standing
-// up a real store.Store.
+// Store is the read/write surface httpapi needs from the store. Kept as an
+// interface so handler tests can use a fake instead of standing up a real
+// Postgres-backed store.Store.
 type Store interface {
-	CreateBatch(vendor domain.Vendor, recordCount int) *domain.Batch
-	GetBatch(id string) (domain.Batch, bool)
-	GetMachineView(machineID string) (domain.MachineView, bool)
-	ListMachineViews(plantFilter, statusFilter string) []domain.MachineView
-	PlantSummary(plantID string) (domain.PlantSummary, error)
+	CreateBatch(ctx context.Context, vendor domain.Vendor, recordCount int) (*domain.Batch, error)
+	GetBatch(ctx context.Context, id string) (domain.Batch, bool, error)
+	GetMachineView(ctx context.Context, machineID string) (domain.MachineView, bool, error)
+	ListMachineViews(ctx context.Context, plantFilter, statusFilter string) ([]domain.MachineView, error)
+	PlantSummary(ctx context.Context, plantID string) (domain.PlantSummary, error)
 }
 
 // Pool is the async submission surface httpapi needs from worker.Pool.

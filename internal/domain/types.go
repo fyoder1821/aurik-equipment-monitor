@@ -5,8 +5,15 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+// ErrNotFound is a sentinel error store methods wrap to signal "this id
+// doesn't exist" as distinct from an underlying storage failure, so
+// httpapi can tell a 404 apart from a 500 without depending on the
+// concrete store implementation.
+var ErrNotFound = errors.New("not found")
 
 type Vendor string
 

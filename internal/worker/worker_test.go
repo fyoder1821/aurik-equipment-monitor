@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -28,7 +29,7 @@ func newFakeSink() *fakeSink {
 	return &fakeSink{callsBySrc: map[string]int{}, dupSeen: map[string]bool{}}
 }
 
-func (f *fakeSink) SaveEvent(ev domain.NormalizedEvent) (bool, error) {
+func (f *fakeSink) SaveEvent(ctx context.Context, ev domain.NormalizedEvent) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -48,10 +49,11 @@ func (f *fakeSink) SaveEvent(ev domain.NormalizedEvent) (bool, error) {
 	return false, nil
 }
 
-func (f *fakeSink) RecomputeMachine(machineID string) {
+func (f *fakeSink) RecomputeMachine(ctx context.Context, machineID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recomputed = append(f.recomputed, machineID)
+	return nil
 }
 
 // fakeBatchTracker records SetOutcome calls so tests can assert on them
@@ -65,13 +67,14 @@ func newFakeBatchTracker() *fakeBatchTracker {
 	return &fakeBatchTracker{outcomes: map[string]map[int]domain.RecordOutcome{}}
 }
 
-func (f *fakeBatchTracker) SetOutcome(batchID string, index int, outcome domain.RecordOutcome) {
+func (f *fakeBatchTracker) SetOutcome(ctx context.Context, batchID string, index int, outcome domain.RecordOutcome) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.outcomes[batchID] == nil {
 		f.outcomes[batchID] = map[int]domain.RecordOutcome{}
 	}
 	f.outcomes[batchID][index] = outcome
+	return nil
 }
 
 func (f *fakeBatchTracker) get(batchID string, index int) (domain.RecordOutcome, bool) {

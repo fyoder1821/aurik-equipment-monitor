@@ -9,15 +9,16 @@
 //   - Sink errors (a failed write) are treated as potentially transient --
 //     the job is retried with backoff up to maxAttempts, then recorded as
 //     "failed" (this service's dead-letter representation, queryable via
-//     the batch status endpoint). The in-memory store used in this project
-//     never actually errors on write, so this path only fires against a
-//     real (e.g. DB-backed) sink or a fault-injecting test double -- see
-//     worker_test.go.
+//     the batch status endpoint). This is a real path now that the sink is
+//     Postgres-backed: a connection blip or pool exhaustion surfaces here
+//     exactly like it would for any other transient infrastructure fault.
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -29,13 +30,13 @@ import (
 // EventSink is the storage dependency the worker needs. store.Store
 // satisfies it; tests use a fake to exercise retry/dead-letter behavior.
 type EventSink interface {
-	SaveEvent(ev domain.NormalizedEvent) (duplicate bool, err error)
-	RecomputeMachine(machineID string)
+	SaveEvent(ctx context.Context, ev domain.NormalizedEvent) (duplicate bool, err error)
+	RecomputeMachine(ctx context.Context, machineID string) error
 }
 
 // BatchTracker records per-record outcomes back onto a batch.
 type BatchTracker interface {
-	SetOutcome(batchID string, index int, outcome domain.RecordOutcome)
+	SetOutcome(ctx context.Context, batchID string, index int, outcome domain.RecordOutcome) error
 }
 
 // Job is one raw vendor record queued for async normalization.
@@ -46,7 +47,10 @@ type Job struct {
 	Raw     json.RawMessage
 }
 
-const defaultMaxAttempts = 3
+const (
+	defaultMaxAttempts = 3
+	jobTimeout         = 10 * time.Second
+)
 
 // Pool is a fixed-size worker pool draining a buffered job channel.
 type Pool struct {
@@ -95,7 +99,21 @@ func (p *Pool) loop() {
 	}
 }
 
+// setOutcome is a small wrapper so process() doesn't repeat the
+// log-on-failure boilerplate at every call site. There's little more to do
+// here than log: the record has already been normalized/rejected/saved,
+// this is just persisting that fact, and the batch status endpoint simply
+// won't reflect it if the write fails.
+func (p *Pool) setOutcome(ctx context.Context, batchID string, index int, outcome domain.RecordOutcome) {
+	if err := p.batches.SetOutcome(ctx, batchID, index, outcome); err != nil {
+		log.Printf("worker: set outcome batch=%s index=%d: %v", batchID, index, err)
+	}
+}
+
 func (p *Pool) process(j Job) {
+	ctx, cancel := context.WithTimeout(context.Background(), jobTimeout)
+	defer cancel()
+
 	var outcome normalize.Outcome
 	switch j.Vendor {
 	case domain.VendorPulseForge:
@@ -103,7 +121,7 @@ func (p *Pool) process(j Job) {
 	case domain.VendorThermexWatch:
 		outcome = normalize.ThermexWatch(j.Raw, p.ref)
 	default:
-		p.batches.SetOutcome(j.BatchID, j.Index, domain.RecordOutcome{
+		p.setOutcome(ctx, j.BatchID, j.Index, domain.RecordOutcome{
 			Vendor: j.Vendor,
 			Status: domain.StatusRejected,
 			Reason: fmt.Sprintf("unsupported vendor %q", j.Vendor),
@@ -112,7 +130,7 @@ func (p *Pool) process(j Job) {
 	}
 
 	if outcome.Reject != "" {
-		p.batches.SetOutcome(j.BatchID, j.Index, domain.RecordOutcome{
+		p.setOutcome(ctx, j.BatchID, j.Index, domain.RecordOutcome{
 			Vendor: j.Vendor,
 			Status: domain.StatusRejected,
 			Reason: outcome.Reject,
@@ -123,10 +141,10 @@ func (p *Pool) process(j Job) {
 	ev := outcome.Event
 	var lastErr error
 	for attempt := 1; attempt <= p.maxAttempts; attempt++ {
-		dup, err := p.sink.SaveEvent(ev)
+		dup, err := p.sink.SaveEvent(ctx, ev)
 		if err == nil {
 			if dup {
-				p.batches.SetOutcome(j.BatchID, j.Index, domain.RecordOutcome{
+				p.setOutcome(ctx, j.BatchID, j.Index, domain.RecordOutcome{
 					SourceEventID: ev.SourceEventID,
 					Vendor:        j.Vendor,
 					Status:        domain.StatusDuplicate,
@@ -135,8 +153,10 @@ func (p *Pool) process(j Job) {
 				})
 				return
 			}
-			p.sink.RecomputeMachine(ev.MachineID)
-			p.batches.SetOutcome(j.BatchID, j.Index, domain.RecordOutcome{
+			if err := p.sink.RecomputeMachine(ctx, ev.MachineID); err != nil {
+				log.Printf("worker: recompute machine %s: %v", ev.MachineID, err)
+			}
+			p.setOutcome(ctx, j.BatchID, j.Index, domain.RecordOutcome{
 				SourceEventID: ev.SourceEventID,
 				Vendor:        j.Vendor,
 				Status:        domain.StatusProcessed,
@@ -149,7 +169,7 @@ func (p *Pool) process(j Job) {
 		time.Sleep(time.Duration(attempt) * 20 * time.Millisecond)
 	}
 
-	p.batches.SetOutcome(j.BatchID, j.Index, domain.RecordOutcome{
+	p.setOutcome(ctx, j.BatchID, j.Index, domain.RecordOutcome{
 		SourceEventID: ev.SourceEventID,
 		Vendor:        j.Vendor,
 		Status:        domain.StatusFailed,
