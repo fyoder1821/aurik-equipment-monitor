@@ -1,12 +1,31 @@
 package store
 
 import (
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
+	"aurik-equipment-monitor/internal/dbtest"
 	"aurik-equipment-monitor/internal/domain"
 	"aurik-equipment-monitor/internal/refdata"
 )
+
+var testDSN string
+
+// TestMain starts one Postgres container for every test in this package
+// and tears it down once, rather than per-test -- see internal/dbtest.
+func TestMain(m *testing.M) {
+	dsn, cleanup, err := dbtest.StartContainer()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	testDSN = dsn
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
@@ -14,20 +33,21 @@ func testStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("refdata.Load: %v", err)
 	}
-	return New(ref)
+	pool := dbtest.Connect(t, testDSN)
+	return New(pool, ref)
 }
 
 func TestSaveEvent_ExactIDDuplicate(t *testing.T) {
 	s := testStore(t)
 	ev := domain.NormalizedEvent{
 		Vendor: domain.VendorPulseForge, SourceEventID: "PF-1001", MachineID: "EQ-001",
-		EventType: "HIGH_VIBRATION", EventTime: time.Now(),
+		EventType: "HIGH_VIBRATION", EventTime: time.Now(), RawPayload: []byte(`{}`),
 	}
-	dup1, err := s.SaveEvent(ev)
+	dup1, err := s.SaveEvent(t.Context(), ev)
 	if err != nil || dup1 {
 		t.Fatalf("first save: dup=%v err=%v, want dup=false err=nil", dup1, err)
 	}
-	dup2, err := s.SaveEvent(ev)
+	dup2, err := s.SaveEvent(t.Context(), ev)
 	if err != nil || !dup2 {
 		t.Fatalf("resubmit with same event id: dup=%v err=%v, want dup=true err=nil", dup2, err)
 	}
@@ -41,17 +61,17 @@ func TestSaveEvent_ContentDuplicate_DifferentSourceID(t *testing.T) {
 	eventTime := time.Now()
 	original := domain.NormalizedEvent{
 		Vendor: domain.VendorThermexWatch, SourceEventID: "TW-8801", MachineID: "EQ-001",
-		EventType: "VIB_WARN", EventTime: eventTime,
+		EventType: "VIB_WARN", EventTime: eventTime, RawPayload: []byte(`{}`),
 	}
 	retry := domain.NormalizedEvent{
 		Vendor: domain.VendorThermexWatch, SourceEventID: "TW-8801-R", MachineID: "EQ-001",
-		EventType: "VIB_WARN", EventTime: eventTime,
+		EventType: "VIB_WARN", EventTime: eventTime, RawPayload: []byte(`{}`),
 	}
 
-	if dup, err := s.SaveEvent(original); dup || err != nil {
+	if dup, err := s.SaveEvent(t.Context(), original); dup || err != nil {
 		t.Fatalf("original save: dup=%v err=%v", dup, err)
 	}
-	dup, err := s.SaveEvent(retry)
+	dup, err := s.SaveEvent(t.Context(), retry)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -62,7 +82,10 @@ func TestSaveEvent_ContentDuplicate_DifferentSourceID(t *testing.T) {
 
 func TestGetMachineView_UnknownMachine(t *testing.T) {
 	s := testStore(t)
-	_, ok := s.GetMachineView("EQ-999")
+	_, ok, err := s.GetMachineView(t.Context(), "EQ-999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if ok {
 		t.Errorf("expected ok=false for a machine not in the asset reference")
 	}
@@ -70,7 +93,10 @@ func TestGetMachineView_UnknownMachine(t *testing.T) {
 
 func TestGetMachineView_KnownMachineNoData(t *testing.T) {
 	s := testStore(t)
-	view, ok := s.GetMachineView("EQ-003")
+	view, ok, err := s.GetMachineView(t.Context(), "EQ-003")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatalf("expected ok=true for a known machine even with no events yet")
 	}
@@ -87,14 +113,16 @@ func TestPlantSummary_CountsAndCriticalMachines(t *testing.T) {
 	ev := domain.NormalizedEvent{
 		Vendor: domain.VendorThermexWatch, SourceEventID: "TW-1", MachineID: "EQ-002",
 		EventType: "TEMP_CRIT", EventTime: time.Now(), AttentionLevel: domain.AttentionCritical,
-		ReasonCode: "THERMEXWATCH_TEMP_CRIT_L5",
+		ReasonCode: "THERMEXWATCH_TEMP_CRIT_L5", RawPayload: []byte(`{}`),
 	}
-	if _, err := s.SaveEvent(ev); err != nil {
+	if _, err := s.SaveEvent(t.Context(), ev); err != nil {
 		t.Fatalf("SaveEvent: %v", err)
 	}
-	s.RecomputeMachine("EQ-002")
+	if err := s.RecomputeMachine(t.Context(), "EQ-002"); err != nil {
+		t.Fatalf("RecomputeMachine: %v", err)
+	}
 
-	summary, err := s.PlantSummary("PLANT_01")
+	summary, err := s.PlantSummary(t.Context(), "PLANT_01")
 	if err != nil {
 		t.Fatalf("PlantSummary: %v", err)
 	}
@@ -117,7 +145,7 @@ func TestPlantSummary_CountsAndCriticalMachines(t *testing.T) {
 
 func TestPlantSummary_UnknownPlant(t *testing.T) {
 	s := testStore(t)
-	if _, err := s.PlantSummary("PLANT_99"); err == nil {
+	if _, err := s.PlantSummary(t.Context(), "PLANT_99"); err == nil {
 		t.Errorf("expected error for unknown plant_id")
 	}
 }

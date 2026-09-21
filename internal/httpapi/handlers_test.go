@@ -2,31 +2,52 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
+	"aurik-equipment-monitor/internal/dbtest"
 	"aurik-equipment-monitor/internal/domain"
 	"aurik-equipment-monitor/internal/refdata"
 	"aurik-equipment-monitor/internal/store"
 	"aurik-equipment-monitor/internal/worker"
 )
 
-// newTestServer wires the real store and worker pool (not fakes) behind
-// the router, so these tests cover the full ingest -> async normalize ->
-// derive -> serve path exactly as it runs in production.
+var testDSN string
+
+// TestMain starts one Postgres container for every test in this package
+// and tears it down once, rather than per-test -- see internal/dbtest.
+func TestMain(m *testing.M) {
+	dsn, cleanup, err := dbtest.StartContainer()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	testDSN = dsn
+	code := m.Run()
+	cleanup()
+	os.Exit(code)
+}
+
+// newTestServer wires the real store (against an ephemeral Postgres
+// container, not a fake) and worker pool behind the router, so these
+// tests cover the full ingest -> async normalize -> derive -> serve path
+// exactly as it runs in production.
 func newTestServer(t *testing.T) (*httptest.Server, *worker.Pool) {
 	t.Helper()
 	ref, err := refdata.Load()
 	if err != nil {
 		t.Fatalf("refdata.Load: %v", err)
 	}
-	st := store.New(ref)
-	pool := worker.NewPool(2, 32, st, st, ref)
-	srv := httptest.NewServer(NewRouter(st, pool))
+	pool := dbtest.Connect(t, testDSN)
+	st := store.New(pool, ref)
+	workerPool := worker.NewPool(2, 32, st, st, ref)
+	srv := httptest.NewServer(NewRouter(st, workerPool))
 	t.Cleanup(srv.Close)
-	return srv, pool
+	return srv, workerPool
 }
 
 // drain closes the pool so all queued jobs finish before assertions run --
