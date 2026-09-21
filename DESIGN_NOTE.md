@@ -110,14 +110,17 @@ fusion) is explicitly out of scope per the brief.
 
 ## Duplicates: two dedupe keys, not one
 
-`store.SaveEvent` checks both an exact key (`vendor + source_event_id`) and
-a content key (`vendor + machine_id + event_type + event_time`).
-`vendor_api_samples/duplicates.json` includes a case the exact key alone
-would miss: the same ThermexWatch reading resent under a *new* reading id
-(`TW-8801-R`) -- a retry-with-a-new-id pattern that's realistic for
-at-least-once vendor delivery. Content-key matching catches it without
-needing a real hash; the composite string is deliberately human-readable
-for debugging.
+`events` has two `UNIQUE` constraints: an exact key (`vendor,
+source_event_id`) and a content key (`vendor, machine_id, event_type,
+event_time`) -- see `db/schema.sql`. `vendor_api_samples/duplicates.json`
+includes a case the exact key alone would miss: the same ThermexWatch
+reading resent under a *new* reading id (`TW-8801-R`) -- a
+retry-with-a-new-id pattern that's realistic for at-least-once vendor
+delivery. `store.SaveEvent` does a plain `INSERT` and treats a Postgres
+`23505` (unique_violation) on *either* constraint as "duplicate, not an
+error" -- the database is the single source of truth for uniqueness, so
+there's no check-then-insert race window the way there would be with an
+application-level pre-check.
 
 ## Retry vs. reject: two different failure classes
 
@@ -125,25 +128,75 @@ The worker pool (`internal/worker/worker.go`) treats normalization
 failures and storage failures differently on purpose. A normalization
 reject is a property of the *data* -- retrying the exact same bad record
 produces the exact same rejection, so retrying is pure waste; it's recorded
-once and left alone. A sink error is (in a real system) a property of the
-*infrastructure* -- a DB write timeout might succeed on the next attempt --
-so it's retried with backoff up to a fixed attempt count, then recorded as
+once and left alone. A sink error is a property of the *infrastructure* --
+a connection blip or pool exhaustion might clear on the next attempt -- so
+it's retried with backoff up to a fixed attempt count, then recorded as
 `failed` (this project's dead-letter representation, queryable via the
-batch status endpoint). The in-memory store used here never actually fails
-a write, so that path is only exercised by a fault-injecting fake in
-`worker_test.go` -- an honest gap, called out rather than hidden, since a
-real deployment's store could fail and this is the mechanism that would
-catch it.
+batch status endpoint). Now that the sink is Postgres-backed, this is a
+real path (a dropped connection genuinely returns an error), but it's still
+awkward to trigger on demand inside a unit test without deliberately
+breaking a live database mid-test -- so `worker_test.go` continues to use a
+fault-injecting fake `EventSink` to exercise it deterministically, rather
+than trying to simulate infrastructure failure against the real one.
 
-## In-memory storage
+## Moving from in-memory to PostgreSQL
 
-The single biggest simplification in this project. Chosen because the
-brief explicitly prefers "a simple, well-reasoned approach" over
-infrastructure for its own sake, and because none of the interesting
-engineering here (normalization policy, aggregation logic, async
-processing, dedupe) needs a real database to demonstrate. The cost is
-explicit and listed in the README: data doesn't survive a restart, and
-there's no horizontal scaling story. `store.Store`'s method set is the only
-thing the HTTP and worker layers depend on (both take it as a small
-interface, not the concrete type), so replacing it with a Postgres-backed
-implementation later is a contained change, not a rewrite.
+The project started with an in-memory `store.Store` (maps behind a mutex),
+documented at the time as the single biggest simplification, justified by
+the brief's preference for "a simple, well-reasoned approach" over
+infrastructure for its own sake. That trade-off was revisited deliberately,
+not because anything about it was wrong for a first pass, but because a
+real persistence layer is worth demonstrating directly rather than only
+describing as a "what I'd do next."
+
+The migration was designed to be a contained change, and it was: `store`'s
+public method set (`CreateBatch`, `SetOutcome`, `GetBatch`, `SaveEvent`,
+`RecomputeMachine`, `GetMachineView`, `ListMachineViews`, `PlantSummary`)
+is unchanged in shape (aside from every method now taking `context.Context`
+and returning an `error`, which real I/O requires honestly). `httpapi` and
+`worker` already depended on `store.Store` through their own small
+interfaces (`httpapi.Store`, `worker.EventSink`/`BatchTracker`), not the
+concrete type, so neither package needed to change beyond threading
+`context.Context` through -- the interfaces just gained a `ctx` parameter
+and an `error` return where storage calls could now genuinely fail.
+
+A few decisions worth calling out:
+
+- **Reference data (`asset_reference.csv`/`line_reference.csv`) stayed as
+  embedded CSV, not tables.** It's static, read-only, and small; there's no
+  write path and no reason to pay a network round trip for a lookup that
+  doesn't change at runtime. Only the *dynamic* state (batches, events,
+  derived views) moved to Postgres.
+- **`batch_outcomes` rows are pre-created at `CreateBatch` time** (one per
+  record slot, via `generate_series`, defaulting to `status = 'queued'`),
+  instead of only appearing once a record is processed. This closes a real
+  gap the in-memory version had: previously, an outcome slot polled before
+  the worker reached it showed an empty `status` string rather than
+  `"queued"`, since the in-memory struct's zero value was never explicitly
+  set. The database default fixes this for free.
+- **`ingested_at` is now populated** via `DEFAULT now()` on the `events`
+  table. In the in-memory version this field existed on
+  `domain.NormalizedEvent` but nothing ever set it -- another small,
+  pre-existing gap this migration closed incidentally rather than by
+  design.
+- **`machine_views` is a denormalized cache, not normalized tables.**
+  `reason_codes` is a Postgres `TEXT[]`; `source_event_refs` and
+  `latest_signals` are `JSONB`. This row is a point-in-time snapshot
+  rebuilt wholesale by `rules.Derive` on every recompute (`INSERT ... ON
+  CONFLICT (machine_id) DO UPDATE`), not something queried piecemeal or
+  updated incrementally -- normalizing its sub-structures into join tables
+  would add write complexity for a read pattern that never needs it. The
+  history those snapshots are built from already lives, fully normalized,
+  in `events`.
+- **`ListMachineViews`/`PlantSummary` batch-fetch views in one query**
+  (`WHERE machine_id = ANY($1)`) rather than querying per machine in a
+  loop. At 8 machines the N+1 version would have been invisible in
+  testing, which is exactly why it's worth avoiding as a habit rather than
+  a scale-triggered fix.
+- **Tests now need Docker, not nothing.** The `store` and `httpapi`
+  packages start a real, ephemeral Postgres container per package via
+  `testcontainers-go` (`internal/dbtest`), apply `db/schema.sql`, and
+  truncate between tests -- so `go test ./...` still needs zero manual
+  setup, but it does now depend on a working Docker daemon where it
+  previously depended on nothing. That's a real cost of the migration, not
+  hidden in the README's [Quick start](README.md#quick-start) section.

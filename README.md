@@ -7,8 +7,9 @@ asynchronously, and serves a derived **machine operational attention view**
 plus plant-level summaries.
 
 Built for the Aurik Technologies Tech Lead take-home assessment. Deliberately
-kept small: two vendors (not three), in-memory storage (not a database), no
-auth. See [Scope & trade-offs](#scope--trade-offs) for why, and
+kept small: two vendors (not three), no auth. Storage is PostgreSQL --
+see [db/schema.sql](db/schema.sql) for the schema. See
+[Scope & trade-offs](#scope--trade-offs) for why, and
 [DESIGN_NOTE.md](DESIGN_NOTE.md) for the reasoning behind the less obvious
 decisions.
 
@@ -23,7 +24,7 @@ flowchart LR
         API[HTTP API] -->|per-record job| Queue[(buffered channel)]
         Queue --> Worker[worker pool]
         Worker -->|normalize| Normalize[normalize package]
-        Normalize -->|dedupe + save| Store[(in-memory store)]
+        Normalize -->|dedupe + save| Store[(PostgreSQL)]
         Store -->|recompute| Rules[rules.Derive]
         Rules --> Store
         RefData[[asset/line reference CSVs]] --> Normalize
@@ -56,16 +57,27 @@ outcome, visible via the batch status endpoint.
 docker compose up --build
 ```
 
-The API is now at `http://localhost:8080`.
+Starts Postgres (schema applied automatically from `db/schema.sql` on first
+boot, via `/docker-entrypoint-initdb.d`) and the API, in that order --
+`equipment-monitor` waits on Postgres's healthcheck before starting. The API
+is at `http://localhost:8080`.
 
 ### Locally, without Docker
 
-Requires Go 1.22+.
+Requires Go 1.25+ and a running Postgres.
 
 ```bash
+createdb aurik_equipment_monitor
+psql aurik_equipment_monitor -f db/schema.sql
+
+export DATABASE_URL='postgres://aurik:aurik@localhost:5432/aurik_equipment_monitor?sslmode=disable'
 go run ./cmd/server
 # listens on :8080; set PORT to change it
 ```
+
+(Or point `DATABASE_URL` at any Postgres you already have -- the schema
+doesn't assume any particular user/db name, those are just what the example
+above and docker-compose.yml use.)
 
 ### Running the tests
 
@@ -75,8 +87,13 @@ go test ./... -race     # with the race detector (worker pool is concurrent)
 ```
 
 36 tests across normalization, the rules engine, the store, the worker pool,
-and full HTTP integration (real store + real worker pool behind
-`httptest.Server`).
+and full HTTP integration (real store + real worker pool, no fakes). The
+store and httpapi packages need a working **Docker daemon** to run --
+they start an ephemeral, schema-loaded Postgres container per package via
+[testcontainers-go](internal/dbtest/dbtest.go) (one container per package,
+reused and truncated between tests in it, not one per test). No manual
+database setup needed for `go test` itself; normalize/rules/worker have no
+such dependency and run instantly.
 
 ## API
 
@@ -180,7 +197,7 @@ What's in vs. out, and why:
 | Included | Why |
 |---|---|
 | 2 vendors (PulseForge, ThermexWatch) | Meets the brief's stated minimum; enough schema divergence (units, timestamp formats, severity scales, camelCase vs. snake_case) to demonstrate real normalization. |
-| In-memory store | No DB setup/migrations needed to run or review this. Thread-safe, but data is lost on restart. |
+| PostgreSQL storage | Batches/outcomes, events, and derived views all persist across restarts. Idempotency is enforced by real `UNIQUE` constraints (see [db/schema.sql](db/schema.sql)), not application-level maps. |
 | Async worker pool (goroutines + channel) | Real concurrency, real retry/dead-letter semantics, no external broker to run. |
 | Per-record accept/reject, not whole-batch | One malformed record in a batch doesn't sink the rest -- this is the actual point of the exercise. |
 | No auth | Explicitly optional per the brief ("if you choose to include it"); would add API-key or mTLS auth in production. |
@@ -188,23 +205,27 @@ What's in vs. out, and why:
 | Deliberately excluded | What I'd do instead in production |
 |---|---|
 | A third vendor (MaintaFlow) | Same normalization pattern extends directly; skipped to keep the codebase small enough to walk through in an interview. |
-| Persistent storage | Swap `store.Store`'s map-backed implementation for a Postgres-backed one behind the same method set used by `httpapi` and `worker` (both already consume it via small interfaces, not the concrete type). |
 | API versioning beyond a `/v1` prefix | Add a version negotiation strategy once there's a second version to negotiate. |
-| Real dead-letter queue / durable retry | The in-memory store never actually fails a write, so this project's retry path is only exercised by a fault-injecting test double ([internal/worker/worker_test.go](internal/worker/worker_test.go)). A production system would persist failed jobs and retry across restarts. |
+| Durable job queue | `batch_outcomes` rows now persist and correctly show `'failed'` after retries are exhausted -- but the retry loop itself is still in-process: a crash mid-retry leaves that record's row stuck at `'queued'` forever, with nothing to redeliver it (the in-memory Go channel job is gone). A production system would need either a durable queue (e.g. a message broker) or a reconciliation sweep that finds stale `'queued'` rows on startup and re-enqueues them. |
+| Migration tooling | `db/schema.sql` is a single hand-run script, not versioned migrations. Fine for one schema, would move to `golang-migrate`/`goose`/etc. the moment the schema needs to evolve without a full recreate. |
 | Rate limiting / backpressure beyond a blocking channel | `Pool.Submit` blocks if the queue is full; production would return `503` instead. |
 | Distributed processing | A single process with an in-memory queue is adequate at this scale; the brief explicitly asks for "a simple and well-reasoned approach," not a distributed system. |
 
 ## Limitations
 
-- **Data loss on restart.** Everything lives in memory. Acceptable for a
-  review/demo; not for production.
+- **The retry loop doesn't survive a restart** (see the "durable job queue"
+  row above) -- persisted status did not automatically mean persisted
+  in-flight work; that distinction is worth being explicit about.
 - **Freshness window is a fixed 2 hours,** not configurable, not
   machine/criticality-aware. A `high`-criticality press probably deserves a
   tighter staleness threshold than a `low`-criticality packager.
 - **No pagination** on `GET /v1/machines` -- fine at 8 machines, not at
-  8,000.
-- **Single-process.** No leader election, no horizontal scaling story; the
-  worker pool and store both assume one process.
+  8,000. `ListMachineViews`/`PlantSummary` already batch-fetch views in one
+  query (`= ANY($1)`), so adding `LIMIT`/`OFFSET` later doesn't require
+  touching that part.
+- **Single-process worker pool.** The Postgres store itself would happily
+  serve multiple app replicas (it's just SQL), but the in-memory job
+  channel is per-process, so today only one replica should run.
 - **Vibration is not cross-vendor-comparable** by design (see DESIGN_NOTE) --
   a consumer wanting a single normalized vibration number across vendors
   would need additional vendor calibration data this assessment doesn't
@@ -212,11 +233,11 @@ What's in vs. out, and why:
 
 ## What I'd do next for production
 
-1. Swap the in-memory store for Postgres (or similar); the store's method
-   set is already the only thing `httpapi` and `worker` depend on, so this
-   is a contained change.
-2. Persist the job queue (or move to a real message broker) so retries and
-   dead-letters survive a restart.
+1. Move retry/redelivery to a durable queue (or add a startup reconciliation
+   sweep for stuck `'queued'` rows) so a crash mid-processing can't silently
+   strand a record -- see "Durable job queue" above.
+2. Adopt migration tooling (`golang-migrate`/`goose`) once the schema needs
+   to evolve incrementally instead of via a full recreate.
 3. Add API-key or mTLS authentication on the ingestion endpoints, and rate
    limiting per vendor.
 4. Make the freshness window and attention thresholds configurable per
@@ -234,8 +255,12 @@ every layer (normalization, rules engine, store, worker pool, HTTP API) and
 the tests, from a scope and set of validation-policy decisions worked out
 in conversation first (which fields are hard-reject vs. soft-normalize,
 the worst-wins aggregation approach, event-time- vs. arrival-order-based
-recency, why vibration units aren't cross-vendor-converted, the in-memory
-vs. database trade-off, and the two-vendor/no-auth minimal scope). All of
-it was reviewed, built, and test-run locally against the assessment's
-sample and edge-case data before being committed; nothing here is
-unreviewed generated output.
+recency, why vibration units aren't cross-vendor-converted, and the
+two-vendor/no-auth minimal scope). Storage started in-memory for the
+initial submission and was deliberately migrated to PostgreSQL afterward
+(schema hand-specified first, store rewritten against it, everything
+re-verified against a real database via testcontainers-go before commit)
+-- both the trade-off and the migration were explicit decisions, not a
+default. All of it was reviewed, built, and test-run locally against the
+assessment's sample and edge-case data before being committed; nothing
+here is unreviewed generated output.
