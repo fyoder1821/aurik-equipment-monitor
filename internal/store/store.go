@@ -346,6 +346,8 @@ func (s *Store) ListMachineViews(ctx context.Context, plantFilter, statusFilter 
 		machines = s.ref.AllMachines()
 	}
 
+	// create slice of MachinId
+	// create map[MachineId]refData.Asset
 	ids := make([]string, len(machines))
 	assetByID := make(map[string]refdata.Asset, len(machines))
 	for i, a := range machines {
@@ -353,6 +355,7 @@ func (s *Store) ListMachineViews(ctx context.Context, plantFilter, statusFilter 
 		assetByID[a.MachineID] = a
 	}
 
+	// fetching Machine_Views and stored in map as map[machineID]Machine_View
 	views, err := s.fetchViews(ctx, ids)
 	if err != nil {
 		return nil, err
@@ -380,6 +383,8 @@ func (s *Store) PlantSummary(ctx context.Context, plantID string) (domain.PlantS
 		return domain.PlantSummary{}, fmt.Errorf("%w: unknown plant_id %q", domain.ErrNotFound, plantID)
 	}
 
+	// create slice of MachinId
+	// create map[MachineId]refData.Asset
 	ids := make([]string, len(machines))
 	assetByID := make(map[string]refdata.Asset, len(machines))
 	for i, a := range machines {
@@ -387,6 +392,7 @@ func (s *Store) PlantSummary(ctx context.Context, plantID string) (domain.PlantS
 		assetByID[a.MachineID] = a
 	}
 
+	// fetching Machine_Views and stored in map as map[machineID]Machine_View
 	views, err := s.fetchViews(ctx, ids)
 	if err != nil {
 		return domain.PlantSummary{}, err
@@ -424,7 +430,9 @@ func (s *Store) PlantSummary(ctx context.Context, plantID string) (domain.PlantS
 			MachinesNeedingAttention: count,
 		})
 	}
-	sort.Slice(summary.Lines, func(i, j int) bool { return summary.Lines[i].LineID < summary.Lines[j].LineID })
+	sort.Slice(summary.Lines, func(i, j int) bool {
+		return summary.Lines[i].LineID < summary.Lines[j].LineID
+	})
 	sort.Strings(summary.CriticalMachines)
 	sort.Strings(summary.StaleMachines)
 

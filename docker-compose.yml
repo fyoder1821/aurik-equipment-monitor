@@ -7,6 +7,7 @@ services:
       - POSTGRES_PASSWORD=aurik
     ports:
       - "5433:5432" # host 5433 -> avoid clashing with a Postgres already running on the host's 5432; the app talks to the container over the internal docker network on 5432 regardless
+      #hostPort:containerPort
     volumes:
       - ./db/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
       - pg-data:/var/lib/postgresql/data
@@ -20,6 +21,7 @@ services:
     build: .
     ports:
       - "8080:8080"
+      #hostPort:containerPort
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://aurik:aurik@postgres:5432/aurik_equipment_monitor?sslmode=disable
